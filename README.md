@@ -40,7 +40,7 @@ Aplicação web para apresentar salas e apoiar a futura reserva de espaços por 
 2. Crie um arquivo `.env` na raiz do projeto e configure `DATABASE_URL` com os dados do seu PostgreSQL. Exemplo com valores fictícios:
 
    ```dotenv
-   DATABASE_URL="postgresql://USUARIO:SENHA@localhost:5432/reservafacil?schema=public"
+   DATABASE_URL="postgresql://USUARIO:SUA_SENHA_LOCAL@localhost:5432/reservafacil?schema=public"
    ```
 
    Crie antes o banco `reservafacil` no PostgreSQL, se ele ainda não existir. Substitua usuário, senha e demais parâmetros pelos valores do seu ambiente. **Nunca faça commit do `.env` nem de credenciais reais.**
