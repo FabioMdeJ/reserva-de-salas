@@ -1,8 +1,14 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import {
+  alternarSelecaoHorario,
+  filtrarSelecaoDisponivel,
+  urlDisponibilidade,
+  type HorarioDisponibilidade,
+} from "@/lib/disponibilidade";
 
 type Sala = {
   id: string;
@@ -13,6 +19,14 @@ type Sala = {
 };
 
 type Horario = { inicio: string; fim: string };
+type ResultadoReserva = {
+  visitanteNome: string;
+  salaNome: string;
+  data: string;
+  horarios: Horario[];
+  total: string;
+  expiraEm: string;
+};
 
 function dataHojeEmSaoPaulo() {
   const partes = new Intl.DateTimeFormat("en-CA", {
@@ -31,15 +45,20 @@ export default function Home() {
   const [erro, setErro] = useState("");
   const [salaSelecionada, setSalaSelecionada] = useState("");
   const [dataReserva, setDataReserva] = useState(dataHojeEmSaoPaulo);
-  const [horarios, setHorarios] = useState<Horario[]>([]);
-  const [horarioSelecionado, setHorarioSelecionado] = useState("");
+  const [horarios, setHorarios] = useState<HorarioDisponibilidade[]>([]);
+  const [horariosSelecionados, setHorariosSelecionados] = useState<string[]>([]);
   const [visitanteNome, setVisitanteNome] = useState("");
   const [visitanteEmail, setVisitanteEmail] = useState("");
   const [visitanteTelefone, setVisitanteTelefone] = useState("");
   const [carregandoHorarios, setCarregandoHorarios] = useState(false);
+  const [estadoDisponibilidade, setEstadoDisponibilidade] = useState<"ociosa" | "carregando" | "carregada" | "erro">("ociosa");
+  const [diaFechado, setDiaFechado] = useState(false);
+  const [erroDisponibilidade, setErroDisponibilidade] = useState("");
   const [enviandoReserva, setEnviandoReserva] = useState(false);
-  const [mensagemReserva, setMensagemReserva] = useState("");
+  const [versaoDisponibilidade, setVersaoDisponibilidade] = useState(0);
+  const [resultadoReserva, setResultadoReserva] = useState<ResultadoReserva | null>(null);
   const [erroReserva, setErroReserva] = useState("");
+  const preservarSelecaoNaAtualizacao = useRef(false);
 
   useEffect(() => {
     async function buscarSalas() {
@@ -63,25 +82,42 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (!salaSelecionada || !dataReserva || mensagemReserva) return;
+    if (!salaSelecionada || !dataReserva || resultadoReserva) return;
     const controller = new AbortController();
+    const preservarSelecao = preservarSelecaoNaAtualizacao.current;
+    preservarSelecaoNaAtualizacao.current = false;
 
     async function buscarHorarios() {
       setCarregandoHorarios(true);
+      setEstadoDisponibilidade("carregando");
+      setErroDisponibilidade("");
       setHorarios([]);
-      setHorarioSelecionado("");
+      if (!preservarSelecao) {
+        setHorariosSelecionados([]);
+      }
       try {
         const resposta = await fetch(
-          `/api/disponibilidade?salaId=${encodeURIComponent(salaSelecionada)}&data=${dataReserva}`,
+          urlDisponibilidade(salaSelecionada, dataReserva),
           { signal: controller.signal, cache: "no-store" },
         );
         const dados = await resposta.json();
         if (!resposta.ok) throw new Error(dados.mensagem || "Não foi possível consultar os horários.");
+        if (!Array.isArray(dados.horarios) || typeof dados.fechado !== "boolean") {
+          throw new Error("A resposta de disponibilidade está em um formato inválido.");
+        }
         setHorarios(dados.horarios);
-        setErroReserva("");
+        setDiaFechado(dados.fechado);
+        setHorariosSelecionados((selecionados) =>
+          filtrarSelecaoDisponivel(selecionados, dados.horarios),
+        );
+        setEstadoDisponibilidade("carregada");
       } catch (error) {
         if (!controller.signal.aborted) {
-          setErroReserva(error instanceof Error ? error.message : "Não foi possível consultar os horários.");
+          setHorarios([]);
+          setHorariosSelecionados([]);
+          setDiaFechado(false);
+          setEstadoDisponibilidade("erro");
+          setErroDisponibilidade(error instanceof Error ? error.message : "Não foi possível consultar os horários.");
         }
       } finally {
         if (!controller.signal.aborted) setCarregandoHorarios(false);
@@ -90,10 +126,42 @@ export default function Home() {
 
     void buscarHorarios();
     return () => controller.abort();
-  }, [salaSelecionada, dataReserva, mensagemReserva]);
+  }, [salaSelecionada, dataReserva, resultadoReserva, versaoDisponibilidade]);
+
+  function atualizarDisponibilidade() {
+    preservarSelecaoNaAtualizacao.current = true;
+    setErroReserva("");
+    setEstadoDisponibilidade("ociosa");
+    setHorarios([]);
+    setVersaoDisponibilidade((versao) => versao + 1);
+  }
+
+  function alternarHorario(horaInicio: string) {
+    if (carregandoHorarios || enviandoReserva) {
+      return;
+    }
+    setErroReserva("");
+
+    setHorariosSelecionados((selecionados) => alternarSelecaoHorario(selecionados, horaInicio, horarios));
+  }
 
   async function criarReserva(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const nome = visitanteNome.trim();
+    const email = visitanteEmail.trim().toLowerCase();
+    if (
+      !salaSelecionada || !dataReserva || nome.length < 2 ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
+      horariosSelecionados.length === 0 ||
+      estadoDisponibilidade !== "carregada" ||
+      !horariosSelecionados.every((inicio) =>
+        horarios.some((horario) => horario.inicio === inicio && horario.estado === "DISPONIVEL"),
+      )
+    ) {
+      setErroReserva("Informe seu nome e e-mail válidos e selecione pelo menos um período.");
+      return;
+    }
+
     setEnviandoReserva(true);
     setErroReserva("");
     try {
@@ -103,17 +171,30 @@ export default function Home() {
         body: JSON.stringify({
           salaId: salaSelecionada,
           data: dataReserva,
-          horaInicio: horarioSelecionado,
-          nome: visitanteNome,
-          email: visitanteEmail,
+          horarios: horariosSelecionados,
+          nome,
+          email,
           telefone: visitanteTelefone,
         }),
       });
-      const dados = await resposta.json();
-      if (!resposta.ok) throw new Error(dados.mensagem || "Não foi possível criar a reserva.");
-      setMensagemReserva(`Horário reservado até ${new Intl.DateTimeFormat("pt-BR", {
-        timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit",
-      }).format(new Date(dados.reserva.expiraEm))}. O pagamento não foi realizado.`);
+      const dados = await resposta.json().catch(() => null);
+      if (!resposta.ok) {
+        throw new Error(typeof dados?.mensagem === "string" ? dados.mensagem : "Não foi possível criar a reserva.");
+      }
+      if (
+        !dados || !Array.isArray(dados.reservas) || dados.reservas.length === 0 ||
+        typeof dados.total !== "string" || typeof dados.expiraEm !== "string"
+      ) {
+        throw new Error("O servidor não retornou os dados da solicitação. Atualize os horários e tente novamente.");
+      }
+      setResultadoReserva({
+        visitanteNome: nome,
+        salaNome: salas.find((sala) => sala.id === salaSelecionada)?.nome ?? "Sala selecionada",
+        data: dataReserva,
+        horarios: dados.reservas.map((reserva: { horaInicio: string; horaFim: string }) => ({ inicio: reserva.horaInicio, fim: reserva.horaFim })),
+        total: dados.total,
+        expiraEm: dados.expiraEm,
+      });
     } catch (error) {
       setErroReserva(error instanceof Error ? error.message : "Não foi possível criar a reserva.");
     } finally {
@@ -127,6 +208,10 @@ export default function Home() {
       currency: "BRL",
     });
   }
+
+  const salaAtual = salas.find((sala) => sala.id === salaSelecionada);
+  const valorHora = Number(salaAtual?.valorHora ?? 0);
+  const valorTotalEstimado = Math.round(valorHora * 100) * horariosSelecionados.length / 100;
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900">
@@ -237,7 +322,11 @@ export default function Home() {
                     onClick={() => {
                       setSalaSelecionada(sala.id);
                       setDataReserva(dataHojeEmSaoPaulo());
-                      setMensagemReserva("");
+                      setEstadoDisponibilidade("ociosa");
+                      setHorarios([]);
+                      setDiaFechado(false);
+                      setHorariosSelecionados([]);
+                      setResultadoReserva(null);
                       setErroReserva("");
                     }}
                     className="mt-6 w-full rounded-lg bg-blue-600 px-4 py-3 font-semibold text-white transition hover:bg-blue-500"
@@ -248,20 +337,34 @@ export default function Home() {
 
                 {salaSelecionada === sala.id && (
                   <form onSubmit={criarReserva} className="mt-6 space-y-4 border-t border-slate-100 pt-5">
-                    {mensagemReserva ? (
-                      <div role="status" className="rounded-lg bg-green-50 p-4 text-sm text-green-800">
-                        {mensagemReserva}
+                    {resultadoReserva ? (
+                      <div role="status" className="space-y-3 rounded-lg bg-green-50 p-4 text-sm text-green-900">
+                        <h4 className="font-semibold">Solicitação de reserva registrada</h4>
+                        <p><strong>Visitante:</strong> {resultadoReserva.visitanteNome}</p>
+                        <p><strong>Sala:</strong> {resultadoReserva.salaNome}</p>
+                        <p><strong>Data:</strong> {new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", dateStyle: "short" }).format(new Date(`${resultadoReserva.data}T12:00:00.000Z`))}</p>
+                        <div>
+                          <p className="font-medium">Períodos registrados:</p>
+                          <ul className="list-inside list-disc">
+                            {resultadoReserva.horarios.map((horario) => <li key={horario.inicio}>{horario.inicio} – {horario.fim}</li>)}
+                          </ul>
+                        </div>
+                        <p><strong>Quantidade de horas:</strong> {resultadoReserva.horarios.length}</p>
+                        <p><strong>Valor total calculado pelo servidor:</strong> {formatarPreco(resultadoReserva.total)}</p>
+                        <p><strong>Status:</strong> Pendente. A solicitação não está confirmada nem paga.</p>
+                        <p>A próxima etapa deve ser concluída em até 15 minutos, até {new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", dateStyle: "short", timeStyle: "short" }).format(new Date(resultadoReserva.expiraEm))}.</p>
+                        <button type="button" onClick={() => setSalaSelecionada("")} className="w-full px-4 py-2 text-sm text-green-900 underline">Fechar</button>
                       </div>
                     ) : (
                       <>
                         <h4 className="font-semibold">Seus dados para a reserva</h4>
                         <label className="block text-sm font-medium">
                           Nome
-                          <input required minLength={2} maxLength={120} value={visitanteNome} onChange={(event) => setVisitanteNome(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" />
+                          <input required minLength={2} maxLength={120} value={visitanteNome} onChange={(event) => { setVisitanteNome(event.target.value); setErroReserva(""); }} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" />
                         </label>
                         <label className="block text-sm font-medium">
                           E-mail
-                          <input required type="email" maxLength={254} value={visitanteEmail} onChange={(event) => setVisitanteEmail(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" />
+                          <input required type="email" maxLength={254} value={visitanteEmail} onChange={(event) => { setVisitanteEmail(event.target.value); setErroReserva(""); }} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" />
                         </label>
                         <label className="block text-sm font-medium">
                           Telefone (opcional)
@@ -269,23 +372,70 @@ export default function Home() {
                         </label>
                         <label className="block text-sm font-medium">
                           Data (horário de São Paulo)
-                          <input required type="date" min={dataHojeEmSaoPaulo()} value={dataReserva} onChange={(event) => setDataReserva(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" />
+                          <input required type="date" min={dataHojeEmSaoPaulo()} value={dataReserva} onChange={(event) => { setHorariosSelecionados([]); setHorarios([]); setDiaFechado(false); setEstadoDisponibilidade("ociosa"); setDataReserva(event.target.value); setErroReserva(""); setErroDisponibilidade(""); }} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" />
                         </label>
                         <div>
-                          <p className="mb-2 text-sm font-medium">Horários disponíveis</p>
+                          <p className="mb-2 text-sm font-medium">Períodos disponíveis</p>
+                          <p className="mb-2 text-xs text-slate-500">Selecione um ou mais períodos. A reserva só será criada ao confirmar.</p>
                           {carregandoHorarios && <p className="text-sm text-slate-500">Consultando...</p>}
-                          {!carregandoHorarios && horarios.length === 0 && <p className="text-sm text-slate-500">Nenhum horário disponível nesta data.</p>}
-                          <div className="grid grid-cols-3 gap-2">
-                            {horarios.map((horario) => (
-                              <button key={horario.inicio} type="button" onClick={() => setHorarioSelecionado(horario.inicio)} className={`rounded-lg border px-2 py-2 text-sm ${horarioSelecionado === horario.inicio ? "border-blue-600 bg-blue-50 text-blue-700" : "border-slate-300 hover:border-blue-400"}`}>
-                                {horario.inicio}
+                          {estadoDisponibilidade === "erro" && (
+                            <div role="alert" className="mb-3 space-y-2 text-sm text-red-700">
+                              <p>{erroDisponibilidade}</p>
+                              <button type="button" onClick={atualizarDisponibilidade} disabled={carregandoHorarios || enviandoReserva} className="font-medium underline disabled:opacity-50">
+                                Tentar consultar novamente
                               </button>
-                            ))}
+                            </div>
+                          )}
+                          {estadoDisponibilidade === "carregada" && diaFechado && <p className="text-sm text-slate-500">Não há expediente nesta data (domingo fechado).</p>}
+                          {estadoDisponibilidade === "carregada" && !diaFechado && horarios.length === 0 && <p className="text-sm text-slate-500">Nenhum período válido para reserva nesta data.</p>}
+                          {estadoDisponibilidade === "carregada" && horarios.length > 0 && !horarios.some((horario) => horario.estado === "DISPONIVEL") && <p className="mb-3 text-sm text-slate-600">Não existem horários disponíveis nesta data.</p>}
+                          <div className="grid grid-cols-3 gap-2">
+                            {estadoDisponibilidade === "carregada" && horarios.map((horario) => {
+                              const selecionado = horariosSelecionados.includes(horario.inicio);
+                              const ocupado = horario.estado === "RESERVADO";
+                              const indisponivel = horario.estado === "INDISPONIVEL";
+                              const desabilitado = horario.estado !== "DISPONIVEL" || carregandoHorarios || enviandoReserva;
+                              return (
+                                <button
+                                  key={horario.inicio}
+                                  type="button"
+                                  disabled={desabilitado}
+                                  aria-pressed={selecionado}
+                                  aria-label={`${horario.inicio} a ${horario.fim}: ${ocupado ? "Reservado" : indisponivel ? "Indisponível" : selecionado ? "Selecionado" : "Disponível"}`}
+                                  onClick={() => alternarHorario(horario.inicio)}
+                                  className={`rounded-lg border px-2 py-2 text-sm ${selecionado ? "border-blue-600 bg-blue-50 text-blue-700" : ocupado || indisponivel ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400 opacity-70" : "border-slate-300 hover:border-blue-400"}`}
+                                >
+                                  <span className="block">{horario.inicio} – {horario.fim}</span>
+                                  {(ocupado || indisponivel) && <span className="mt-1 block text-xs">{ocupado ? "Reservado" : "Indisponível"}</span>}
+                                </button>
+                              );
+                            })}
                           </div>
                         </div>
-                        {erroReserva && <p role="alert" className="text-sm text-red-700">{erroReserva}</p>}
-                        <p className="text-xs leading-5 text-slate-500">A reserva fica pendente por 15 minutos. Esta etapa não processa pagamentos.</p>
-                        <button type="submit" disabled={!horarioSelecionado || carregandoHorarios || enviandoReserva} className="w-full rounded-lg bg-blue-600 px-4 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300">
+                        <div className="rounded-lg bg-slate-50 p-4 text-sm">
+                          <p>Preço por hora: <strong>{formatarPreco(salaAtual?.valorHora ?? "0")}</strong></p>
+                          <p className="mt-2 font-medium">Períodos selecionados</p>
+                          {horariosSelecionados.length > 0 ? (
+                            <ul className="mt-1 list-inside list-disc text-slate-600">
+                              {horariosSelecionados.map((horaInicio) => {
+                                const periodo = horarios.find((horario) => horario.inicio === horaInicio);
+                                return periodo ? <li key={horaInicio}>{periodo.inicio} – {periodo.fim}</li> : null;
+                              })}
+                            </ul>
+                          ) : <p className="mt-1 text-slate-500">Nenhum período selecionado.</p>}
+                          <p className="mt-2">Quantidade de horas: <strong>{horariosSelecionados.length}</strong></p>
+                          <p className="mt-1">Valor total estimado: <strong>{formatarPreco(String(valorTotalEstimado))}</strong></p>
+                        </div>
+                        {erroReserva && (
+                          <div role="alert" className="space-y-2 text-sm text-red-700">
+                            <p>{erroReserva}</p>
+                            <button type="button" onClick={atualizarDisponibilidade} disabled={carregandoHorarios || enviandoReserva} className="font-medium underline disabled:opacity-50">
+                              Atualizar disponibilidade
+                            </button>
+                          </div>
+                        )}
+                        <p className="text-xs leading-5 text-slate-500">O valor é estimativo até a confirmação. Os períodos selecionados ficam pendentes por 15 minutos após confirmar. Esta etapa não processa pagamentos.</p>
+                        <button type="submit" disabled={horariosSelecionados.length === 0 || carregandoHorarios || estadoDisponibilidade !== "carregada" || enviandoReserva || Boolean(erroReserva) || Boolean(erroDisponibilidade)} className="w-full rounded-lg bg-blue-600 px-4 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300">
                           {enviandoReserva ? "Criando reserva..." : "Confirmar reserva"}
                         </button>
                         <button type="button" onClick={() => setSalaSelecionada("")} className="w-full px-4 py-2 text-sm text-slate-600 hover:text-slate-900">Fechar</button>

@@ -4,6 +4,8 @@ export type Expediente = {
   fechamento: string;
 };
 
+const DURACAO_RESERVA_MINUTOS = 60;
+
 export function obterExpediente(data: Date): Expediente | null {
   const diaSemana = data.getUTCDay();
 
@@ -27,10 +29,7 @@ export function obterExpediente(data: Date): Expediente | null {
   };
 }
 
-export function gerarHorarios(
-  expediente: Expediente,
-  duracaoMinutos = 60,
-) {
+export function gerarHorarios(expediente: Expediente) {
   const horarios: { inicio: string; fim: string }[] = [];
 
   const [horaAbertura, minutoAbertura] = expediente.abertura
@@ -43,13 +42,14 @@ export function gerarHorarios(
 
   const abertura = horaAbertura * 60 + minutoAbertura;
   const fechamento = horaFechamento * 60 + minutoFechamento;
+  const primeiroInicioEmHoraCheia = Math.ceil(abertura / 60) * 60;
 
   for (
-    let inicio = abertura;
-    inicio + duracaoMinutos <= fechamento;
-    inicio += duracaoMinutos
+    let inicio = primeiroInicioEmHoraCheia;
+    inicio + DURACAO_RESERVA_MINUTOS <= fechamento;
+    inicio += DURACAO_RESERVA_MINUTOS
   ) {
-    const fim = inicio + duracaoMinutos;
+    const fim = inicio + DURACAO_RESERVA_MINUTOS;
 
     horarios.push({
       inicio: `${String(Math.floor(inicio / 60)).padStart(2, "0")}:${String(inicio % 60).padStart(2, "0")}`,
@@ -58,4 +58,13 @@ export function gerarHorarios(
   }
 
   return horarios;
+}
+
+export function obterHorarioPermitido(data: Date, horaInicio: string) {
+  if (!/^(?:[01]\d|2[0-3]):00$/.test(horaInicio)) return null;
+
+  const expediente = obterExpediente(data);
+  if (!expediente) return null;
+
+  return gerarHorarios(expediente).find((horario) => horario.inicio === horaInicio) ?? null;
 }

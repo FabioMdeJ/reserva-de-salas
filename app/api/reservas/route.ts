@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { gerarHorarios, obterExpediente } from "@/lib/expediente";
+import { obterHorarioPermitido } from "@/lib/expediente";
 import {
-  criarReservaComBloqueio,
+  criarReservasComBloqueio,
   respostaErroReserva,
 } from "@/lib/reserva-service";
 import {
@@ -30,15 +30,21 @@ export async function POST(request: NextRequest) {
   const email = typeof dados.email === "string" ? dados.email.trim().toLowerCase() : "";
   const telefone = typeof dados.telefone === "string" ? dados.telefone.trim() : "";
   const dataTexto = typeof dados.data === "string" ? dados.data : null;
-  const horaInicio = typeof dados.horaInicio === "string" ? dados.horaInicio : "";
+  const horariosRecebidos = dados.horarios === undefined && typeof dados.horaInicio === "string"
+    ? [dados.horaInicio]
+    : dados.horarios;
 
   if (
     !salaId || salaId.length > 100 || nome.length < 2 || nome.length > 120 ||
     email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
-    telefone.length > 30 || !dataLocalValida(dataTexto) || !/^\d{2}:\d{2}$/.test(horaInicio)
+    telefone.length > 30 || !dataLocalValida(dataTexto) ||
+    !Array.isArray(horariosRecebidos) || horariosRecebidos.length === 0 ||
+    horariosRecebidos.length > 10 ||
+    !horariosRecebidos.every((hora): hora is string => typeof hora === "string" && /^\d{2}:\d{2}$/.test(hora)) ||
+    new Set(horariosRecebidos).size !== horariosRecebidos.length
   ) {
     return NextResponse.json(
-      { mensagem: "Informe nome, e-mail, sala, data e horário válidos." },
+      { mensagem: "Informe nome, e-mail, sala, data e pelo menos um horário válido." },
       { status: 400 },
     );
   }
@@ -48,35 +54,37 @@ export async function POST(request: NextRequest) {
   inicioProximoDia.setUTCDate(inicioProximoDia.getUTCDate() + 1);
   const agoraSolicitacao = new Date();
 
-  if (
-    dataTexto < obterDataLocal(agoraSolicitacao) ||
-    (dataTexto === obterDataLocal(agoraSolicitacao) && horaInicio <= obterHoraLocal(agoraSolicitacao))
-  ) {
+  const horariosOrdenados = [...horariosRecebidos].sort();
+  const dataNoonUtc = new Date(`${dataTexto}T12:00:00.000Z`);
+  const periodos: Array<{ horaInicio: string; horaFim: string }> = [];
+  for (const horaInicio of horariosOrdenados) {
+    const periodo = obterHorarioPermitido(dataNoonUtc, horaInicio);
+    if (!periodo) {
+      return NextResponse.json({ mensagem: "Escolha um horário válido dentro do expediente." }, { status: 400 });
+    }
+    periodos.push({ horaInicio: periodo.inicio, horaFim: periodo.fim });
+  }
+
+  if (dataTexto < obterDataLocal(agoraSolicitacao) || (
+    dataTexto === obterDataLocal(agoraSolicitacao) &&
+    periodos.some((periodo) => periodo.horaInicio <= obterHoraLocal(agoraSolicitacao))
+  )) {
     return NextResponse.json({ mensagem: "Escolha uma data e um horário futuros." }, { status: 400 });
   }
 
-  const expediente = obterExpediente(new Date(`${dataTexto}T12:00:00.000Z`));
-  const horario = expediente && gerarHorarios(expediente).find(
-    (opcao) => opcao.inicio === horaInicio,
-  );
-  if (!horario) {
-    return NextResponse.json({ mensagem: "Escolha um horário válido dentro do expediente." }, { status: 400 });
-  }
-
   try {
-    const reserva = await criarReservaComBloqueio(prisma, {
+    const resultado = await criarReservasComBloqueio(prisma, {
       salaId,
       dataTexto,
       dataReserva,
       inicioProximoDia,
-      horaInicio,
-      horaFim: horario.fim,
+      periodos,
       nome,
       email,
       telefone: telefone || null,
     });
 
-    return NextResponse.json({ reserva }, { status: 201 });
+    return NextResponse.json(resultado, { status: 201 });
   } catch (error) {
     const resposta = respostaErroReserva(error);
     if (resposta) {

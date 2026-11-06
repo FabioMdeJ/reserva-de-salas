@@ -1,6 +1,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
+import { classificarHorarios } from "@/lib/disponibilidade";
 import { gerarHorarios, obterExpediente } from "@/lib/expediente";
 import {
   criarDataReserva,
@@ -45,6 +46,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({
         salaId,
         data: dataTexto,
+        fechado: true,
         horarios: [],
       });
     }
@@ -56,12 +58,16 @@ export async function GET(request: NextRequest) {
     inicioDoProximoDia.setUTCDate(inicioDoProximoDia.getUTCDate() + 1);
 
     const agora = new Date();
+    const limiteExpiracao = new Date(agora.getTime() - 15 * 60 * 1000);
     await prisma.reserva.updateMany({
       where: {
         salaId,
         data: { gte: inicioDoDia, lt: inicioDoProximoDia },
         status: "PENDENTE",
-        expiraEm: { lte: agora },
+        OR: [
+          { expiraEm: { lte: agora } },
+          { expiraEm: null, createdAt: { lte: limiteExpiracao } },
+        ],
       },
       data: { status: "EXPIRADA" },
     });
@@ -75,7 +81,13 @@ export async function GET(request: NextRequest) {
         },
         OR: [
           { status: "CONFIRMADA" },
-          { status: "PENDENTE", OR: [{ expiraEm: null }, { expiraEm: { gt: agora } }] },
+          {
+            status: "PENDENTE",
+            OR: [
+              { expiraEm: { gt: agora } },
+              { expiraEm: null, createdAt: { gt: limiteExpiracao } },
+            ],
+          },
         ],
       },
       select: {
@@ -84,26 +96,19 @@ export async function GET(request: NextRequest) {
       },
     });
 
-    const horariosDisponiveis = horarios.filter((horario) => {
-      if (
-        dataTexto < obterDataLocal(agora) ||
-        (dataTexto === obterDataLocal(agora) && horario.inicio <= obterHoraLocal(agora))
-      ) {
-        return false;
-      }
-      const ocupado = reservas.some(
-        (reserva) =>
-          horario.inicio < reserva.horaFim &&
-          horario.fim > reserva.horaInicio,
-      );
-
-      return !ocupado;
-    });
+    const horariosClassificados = classificarHorarios(
+      horarios,
+      reservas,
+      dataTexto,
+      obterDataLocal(agora),
+      obterHoraLocal(agora),
+    );
 
     return NextResponse.json({
       salaId,
       data: dataTexto,
-      horarios: horariosDisponiveis,
+      fechado: false,
+      horarios: horariosClassificados,
     });
   } catch (error) {
     console.error("Erro ao consultar disponibilidade:", error);
